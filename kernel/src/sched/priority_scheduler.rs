@@ -4,6 +4,7 @@ use ostd::{
     cpu::{num_cpus, CpuSet, PinCurrentCpu},
     sync::PreemptDisabled,
     task::{
+        disable_preempt,
         scheduler::{
             info::CommonSchedInfo, inject_scheduler, EnqueueFlags, LocalRunQueue, Scheduler,
             UpdateFlags,
@@ -13,12 +14,20 @@ use ostd::{
     trap::disable_local,
 };
 
-use super::priority::{Priority, PriorityRange};
+use super::{
+    priority::{Priority, PriorityRange},
+    stats::{inject_scheduler_stats, SchedulerStats},
+};
 use crate::{prelude::*, thread::Thread};
 
 pub fn init() {
     let preempt_scheduler = Box::new(PreemptScheduler::default());
     let scheduler = Box::<PreemptScheduler<Thread, Task>>::leak(preempt_scheduler);
+
+    // Inject the scheduler into the system for statistics.
+    inject_scheduler_stats(scheduler);
+
+    // Inject the scheduler into the ostd for actual scheduling work.
     inject_scheduler(scheduler);
 }
 
@@ -114,6 +123,39 @@ impl<T: Sync + Send + PreemptSchedInfo + FromTask<U>, U: Sync + Send + CommonSch
         let local_rq: &mut PreemptRunQueue<T, U> =
             &mut self.rq[irq_guard.current_cpu() as usize].lock();
         f(local_rq);
+    }
+}
+
+impl<T: Sync + Send + PreemptSchedInfo + FromTask<U>, U: Sync + Send + CommonSchedInfo>
+    SchedulerStats for PreemptScheduler<T, U>
+{
+    fn nr_queued(&self) -> u64 {
+        let _preempt_guard = disable_preempt();
+        let mut queued = 0;
+
+        for rq in self.rq.iter() {
+            let rq = rq.lock();
+
+            queued +=
+                rq.real_time_entities.len() + rq.normal_entities.len() + rq.lowest_entities.len();
+        }
+
+        queued as u64
+    }
+
+    fn nr_running(&self) -> u64 {
+        let _preempt_guard = disable_preempt();
+        let mut nr_running = 0;
+
+        for rq in self.rq.iter() {
+            let rq = rq.lock();
+
+            if rq.current.is_some() {
+                nr_running += 1;
+            }
+        }
+
+        nr_running
     }
 }
 
